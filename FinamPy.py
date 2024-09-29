@@ -1,3 +1,4 @@
+from functools import lru_cache
 from typing import Union  # Объединение типов
 from datetime import datetime
 from time import sleep
@@ -422,28 +423,27 @@ class FinamPy:
 
     def subscriptions_handler(self):
         """Поток обработки подписок"""
-        events_stub = EventsStub(self.channel)  # Сервис событий (подписок)
-        events = events_stub.GetEvents(request_iterator=self.request_iterator(), metadata=self.metadata)  # Получаем значения подписок
         try:
+            events_stub = EventsStub(self.channel)  # Сервис событий (подписок)
+            events = events_stub.GetEvents(request_iterator=self.request_iterator(), metadata=self.metadata)  # Получаем значения подписок
             for event in events:  # Пробегаемся по значениям подписок до закрытия канала
                 e: proto_events.Event = event  # Приводим пришедшее значение к подпискам
+                self.logger.info(f'subscriptions_handler: incoming event: {e!r}')
                 if e.order != proto_events.OrderEvent():  # Если пришло событие с заявкой
-                    self.logger.debug(f'subscriptions_handler: Пришли данные подписки OrderEvent {e.order}')
                     self.on_order(e.order)
                 if e.trade != proto_events.TradeEvent():  # Если пришло событие со сделкой
-                    self.logger.debug(f'subscriptions_handler: Пришли данные подписки TradeEvent {e.trade}')
                     self.on_trade(e.trade)
                 if e.order_book != proto_events.OrderBookEvent():  # Если пришло событие стакана
-                    self.logger.debug(f'subscriptions_handler: Пришли данные подписки OrderBookEvent {e.order_book}')
                     self.on_order_book(e.order_book)
                 if e.portfolio != proto_events.PortfolioEvent():  # Если пришло событие портфеля
-                    self.logger.debug(f'subscriptions_handler: Пришли данные подписки PortfolioEvent {e.portfolio}')
                     self.on_portfolio(e.portfolio)
                 if e.response != proto_common.ResponseEvent():  # Если пришло событие результата выполнения запроса
-                    self.logger.debug(f'subscriptions_handler: Пришли данные подписки ResponseEvent {e.response}')
                     self.on_response(e.response)
-        except RpcError:  # При закрытии канала попадем на эту ошибку (grpc._channel._MultiThreadedRendezvous)
+        except RpcError as exc:  # При закрытии канала попадем на эту ошибку (grpc._channel._MultiThreadedRendezvous)
+            self.logger.error(f'Error requesting events: {exc!r}')
             self.subscriptions_thread = None  # Сбрасываем поток обработки подписок. Запустим его снова на новой подписке
+
+        self.logger.debug('subscriptions_handler exited')
 
     def keep_alive_handler(self):
         """Поток поддержания активности. Чтобы сервер Финам не удалял канал, и не получали ошибку Stream removed"""
@@ -452,7 +452,9 @@ class FinamPy:
             exit_event_set = self.keep_alive_exit_event.wait(120)  # Ждем нового бара или события выхода из потока  # Ждем 2 минуты (подбирается экспериментально)
             if exit_event_set:  # Если произошло событие выхода из потока
                 self.logger.debug('Выход из потока поддержания активности')
-                return  # Выходим из потока, дальше не продолжаем
+                break
+
+        self.logger.debug('keep_alive_handler exited')
 
     # Выход и закрытие
 
@@ -498,6 +500,7 @@ class FinamPy:
             board = 'SPBFUT'  # Меняем код режима торгов на каноническое
         return f'{board}.{symbol}'
 
+    @lru_cache()
     def get_symbol_info(self, board_market, symbol) -> Union[proto_security.Security, None]:
         """Спецификация тикера
 
